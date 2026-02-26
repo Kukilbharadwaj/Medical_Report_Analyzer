@@ -59,8 +59,11 @@ def initialize_session_state():
     if 'use_image_analysis' not in st.session_state:
         st.session_state.use_image_analysis = True
     
-    if 'analyzed_images' not in st.session_state:
-        st.session_state.analyzed_images = []
+    if 'uploaded_images' not in st.session_state:
+        st.session_state.uploaded_images = []
+    
+    if 'has_content' not in st.session_state:
+        st.session_state.has_content = False
 
 
 def main():
@@ -74,62 +77,116 @@ def main():
     **Features:**
     - 📄 PDF document processing with text analysis
     - 🖼️ Medical image extraction and analysis (X-rays, MRI, CT scans)
-    - 🔍 Hybrid search (Vector + BM25)
+    - � Direct image upload for standalone analysis
+    - �🔍 Hybrid search (Vector + BM25)
     - 🎯 Cross-encoder reranking
     - 🧠 CLIP embeddings for image search
     - 👁️ LLaMA Vision for medical image analysis
     - 💬 Powered by Groq's Llama model
     """)
     
-    # Sidebar for PDF upload
+    # Sidebar for file uploads
     with st.sidebar:
-        st.header("📤 Upload Medical Report (PDF)")
+        st.header("📤 Upload Medical Files")
         
-        uploaded_file = st.file_uploader(
-            "Choose a PDF file",
-            type=['pdf'],
-            help="Upload a medical report PDF to analyze (supports text + images)"
+        # Tab selection for upload type
+        upload_tab = st.radio(
+            "Upload type:",
+            ["📄 PDF Report", "🖼️ Medical Images"],
+            horizontal=True
         )
         
-        if uploaded_file is not None:
-            if st.button("🚀 Process PDF", type="primary", use_container_width=True):
-                with st.spinner("Processing PDF (extracting text and images)..."):
-                    try:
-                        # Save uploaded file to temporary location
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-                            tmp_file.write(uploaded_file.getvalue())
-                            tmp_path = tmp_file.name
-                        
-                        # Load the PDF
-                        num_chunks = st.session_state.rag.load_pdf(tmp_path)
-                        
-                        # Get image count
-                        image_count = st.session_state.rag.get_image_count()
-                        
-                        # Update session state
-                        st.session_state.pdf_loaded = True
-                        st.session_state.pdf_name = uploaded_file.name
-                        st.session_state.image_count = image_count
-                        st.session_state.analyzed_images = []
-                        
-                        # Clean up temp file
-                        Path(tmp_path).unlink()
-                        
-                        st.success(
-                            f"✅ PDF loaded successfully!\n\n"
-                            f"📄 File: {uploaded_file.name}\n\n"
-                            f"📊 Created {num_chunks} text chunks\n\n"
-                            f"🖼️ Extracted {image_count} images\n\n"
-                            f"💡 You can now ask questions!"
-                        )
-                    except Exception as e:
-                        st.error(f"❌ Error loading PDF: {str(e)}")
+        if upload_tab == "📄 PDF Report":
+            uploaded_file = st.file_uploader(
+                "Choose a PDF file",
+                type=['pdf'],
+                help="Upload a medical report PDF to analyze (supports text + images)"
+            )
+            
+            if uploaded_file is not None:
+                if st.button("🚀 Process PDF", type="primary", use_container_width=True):
+                    with st.spinner("Processing PDF (extracting text and images)..."):
+                        try:
+                            # Save uploaded file to temporary location
+                            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+                                tmp_file.write(uploaded_file.getvalue())
+                                tmp_path = tmp_file.name
+                            
+                            # Load the PDF
+                            num_chunks = st.session_state.rag.load_pdf(tmp_path)
+                            
+                            # Get image count
+                            image_count = st.session_state.rag.get_image_count()
+                            
+                            # Update session state
+                            st.session_state.pdf_loaded = True
+                            st.session_state.pdf_name = uploaded_file.name
+                            st.session_state.image_count = image_count
+                            st.session_state.has_content = True
+                            st.session_state.uploaded_images = []
+                            
+                            # Clean up temp file
+                            try:
+                                Path(tmp_path).unlink()
+                            except Exception:
+                                pass
+                            
+                            if num_chunks > 0:
+                                st.success(
+                                    f"✅ PDF loaded successfully!\n\n"
+                                    f"📄 File: {uploaded_file.name}\n\n"
+                                    f"📊 Created {num_chunks} text chunks\n\n"
+                                    f"🖼️ Extracted {image_count} images\n\n"
+                                    f"💡 You can now ask questions!"
+                                )
+                            else:
+                                st.success(
+                                    f"✅ Image-only PDF loaded!\n\n"
+                                    f"📄 File: {uploaded_file.name}\n\n"
+                                    f"📊 No text found (scanned/image PDF)\n\n"
+                                    f"🖼️ Extracted {image_count} images\n\n"
+                                    f"💡 Images will be analyzed with LLaMA Vision!"
+                                )
+                        except Exception as e:
+                            st.error(f"❌ Error loading PDF: {str(e)}")
+        
+        else:  # Image upload tab
+            uploaded_images = st.file_uploader(
+                "Choose medical images",
+                type=['png', 'jpg', 'jpeg', 'bmp', 'tiff', 'webp'],
+                accept_multiple_files=True,
+                help="Upload medical images (X-rays, MRI, CT scans, etc.) for analysis"
+            )
+            
+            if uploaded_images:
+                if st.button("🚀 Process Images", type="primary", use_container_width=True):
+                    with st.spinner("Processing images..."):
+                        try:
+                            image_files = [
+                                {'data': img.getvalue(), 'name': img.name}
+                                for img in uploaded_images
+                            ]
+                            count = st.session_state.rag.load_images(image_files)
+                            
+                            st.session_state.image_count = st.session_state.rag.get_image_count()
+                            st.session_state.has_content = True
+                            st.session_state.uploaded_images = uploaded_images
+                            
+                            st.success(
+                                f"✅ {count} image(s) loaded!\n\n"
+                                f"🖼️ Total images: {st.session_state.image_count}\n\n"
+                                f"💡 Ask questions about the images!"
+                            )
+                        except Exception as e:
+                            st.error(f"❌ Error loading images: {str(e)}")
         
         # Display status
         st.divider()
-        if st.session_state.pdf_loaded:
-            st.success(f"📄 Document: {st.session_state.pdf_name}")
-            st.info(f"🖼️ Images found: {st.session_state.image_count}")
+        if st.session_state.pdf_loaded or st.session_state.has_content:
+            if st.session_state.pdf_name:
+                st.success(f"📄 Document: {st.session_state.pdf_name}")
+            if st.session_state.image_count > 0:
+                st.info(f"🖼️ Images available: {st.session_state.image_count}")
             
             # Image analysis toggle
             st.session_state.use_image_analysis = st.checkbox(
@@ -138,12 +195,11 @@ def main():
                 help="When enabled, relevant medical images will be analyzed using LLaMA Vision"
             )
         else:
-            st.info("👆 Upload a PDF to get started")
+            st.info("👆 Upload a PDF or images to get started")
         
         # Clear conversation button
         if st.button("🗑️ Clear Conversation", use_container_width=True):
             st.session_state.messages = []
-            st.session_state.analyzed_images = []
             st.rerun()
         
         st.divider()
@@ -153,13 +209,15 @@ def main():
     st.header("💬 Ask Questions About Your Medical Report")
     
     # Display extracted images section if available
-    if st.session_state.pdf_loaded and st.session_state.image_count > 0:
-        with st.expander(f"🖼️ View Extracted Medical Images ({st.session_state.image_count})", expanded=False):
+    if (st.session_state.pdf_loaded or st.session_state.has_content) and st.session_state.image_count > 0:
+        with st.expander(f"🖼️ View Extracted/Uploaded Medical Images ({st.session_state.image_count})", expanded=False):
             images = st.session_state.rag.get_extracted_images()
-            cols = st.columns(min(3, len(images)))
-            for i, img in enumerate(images):
-                with cols[i % 3]:
-                    st.image(img.image, caption=f"Page {img.page_number}, Image {img.image_index + 1}", use_container_width=True)
+            if images:
+                cols = st.columns(min(3, len(images)))
+                for i, img in enumerate(images):
+                    with cols[i % 3]:
+                        caption = f"Page {img.page_number}, Image {img.image_index + 1}" if img.page_number > 0 else f"Uploaded Image {img.image_index + 1}"
+                        st.image(img.image, caption=caption, use_container_width=True)
     
     # Display example questions if no messages
     if len(st.session_state.messages) == 0:
@@ -168,7 +226,7 @@ def main():
         
         with col1:
             if st.button("📝 What is the diagnosis?", use_container_width=True):
-                if st.session_state.pdf_loaded:
+                if st.session_state.pdf_loaded or st.session_state.has_content:
                     st.session_state.messages.append({
                         "role": "user",
                         "content": "What is the diagnosis from this medical report?"
@@ -177,7 +235,7 @@ def main():
         
         with col2:
             if st.button("🖼️ Analyze the X-ray/MRI", use_container_width=True):
-                if st.session_state.pdf_loaded:
+                if st.session_state.pdf_loaded or st.session_state.has_content:
                     st.session_state.messages.append({
                         "role": "user",
                         "content": "Can you analyze the medical images (X-ray, MRI, or CT scan) in this report?"
@@ -186,7 +244,7 @@ def main():
         
         with col3:
             if st.button("📋 Summarize findings", use_container_width=True):
-                if st.session_state.pdf_loaded:
+                if st.session_state.pdf_loaded or st.session_state.has_content:
                     st.session_state.messages.append({
                         "role": "user",
                         "content": "Summarize the key medical findings from this report including any imaging results."
@@ -205,15 +263,16 @@ def main():
                 for img, analysis in message["images"]:
                     col1, col2 = st.columns([1, 2])
                     with col1:
-                        st.image(img.image, caption=f"Page {img.page_number}", use_container_width=True)
+                        caption = f"Page {img.page_number}" if img.page_number > 0 else "Uploaded Image"
+                        st.image(img.image, caption=caption, use_container_width=True)
                     with col2:
                         with st.expander("View Image Analysis", expanded=False):
                             st.markdown(analysis)
     
     # Chat input
-    if prompt := st.chat_input("Ask a question about the medical report..."):
-        if not st.session_state.pdf_loaded:
-            st.warning("⚠️ Please upload and process a PDF document first.")
+    if prompt := st.chat_input("Ask a question about the medical report or images..."):
+        if not (st.session_state.pdf_loaded or st.session_state.has_content):
+            st.warning("⚠️ Please upload a PDF document or images first.")
         else:
             # Add user message
             st.session_state.messages.append({"role": "user", "content": prompt})
@@ -240,7 +299,8 @@ def main():
                                 for img, analysis in image_results:
                                     col1, col2 = st.columns([1, 2])
                                     with col1:
-                                        st.image(img.image, caption=f"Page {img.page_number}", use_container_width=True)
+                                        caption = f"Page {img.page_number}" if img.page_number > 0 else "Uploaded Image"
+                                        st.image(img.image, caption=caption, use_container_width=True)
                                     with col2:
                                         with st.expander("View Image Analysis", expanded=True):
                                             st.markdown(analysis)

@@ -82,7 +82,7 @@ class AdvancedRAGSystem:
         embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
         reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         llm_model: str = "llama-3.3-70b-versatile",
-        vision_model: str = "llama-3.2-90b-vision-preview",
+        vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
         clip_model: str = "openai/clip-vit-base-patch32",
         chunk_size: int = 800,
         chunk_overlap: int = 150,
@@ -178,7 +178,9 @@ class AdvancedRAGSystem:
     
     def _extract_images_from_pdf(self, pdf_path: str, min_width: int = 100, min_height: int = 100) -> List[ExtractedImage]:
         """
-        Extract images from PDF using PyMuPDF
+        Extract images from PDF using PyMuPDF.
+        Uses embedded image extraction first, then falls back to page rendering
+        for scanned/image-only PDFs.
         
         Args:
             pdf_path: Path to PDF file
@@ -189,47 +191,100 @@ class AdvancedRAGSystem:
             List of ExtractedImage objects
         """
         images = []
-        doc = fitz.open(pdf_path)
+        doc = None
         
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            image_list = page.get_images(full=True)
-            
-            for img_index, img_info in enumerate(image_list):
-                xref = img_info[0]
+        try:
+            doc = fitz.open(pdf_path)
+        except Exception as e:
+            print(f"Warning: Could not open PDF for image extraction: {e}")
+            return images
+        
+        try:
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                page_had_images = False
                 
+                # Method 1: Try extracting embedded images
                 try:
-                    base_image = doc.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    
-                    # Convert to PIL Image
-                    pil_image = Image.open(io.BytesIO(image_bytes))
-                    
-                    # Filter small images (likely icons/logos)
-                    if pil_image.width < min_width or pil_image.height < min_height:
-                        continue
-                    
-                    # Convert to RGB if necessary
-                    if pil_image.mode != 'RGB':
-                        pil_image = pil_image.convert('RGB')
-                    
-                    # Convert to base64 for API calls
-                    buffered = io.BytesIO()
-                    pil_image.save(buffered, format="JPEG", quality=85)
-                    base64_data = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                    
-                    images.append(ExtractedImage(
-                        image=pil_image,
-                        page_number=page_num + 1,
-                        image_index=img_index,
-                        base64_data=base64_data
-                    ))
-                    
+                    image_list = page.get_images(full=True)
                 except Exception as e:
-                    print(f"Warning: Could not extract image {img_index} from page {page_num + 1}: {e}")
-                    continue
+                    print(f"Warning: Could not get image list from page {page_num + 1}: {e}")
+                    image_list = []
+                
+                for img_index, img_info in enumerate(image_list):
+                    try:
+                        if not img_info or len(img_info) == 0:
+                            continue
+                        
+                        xref = img_info[0]
+                        base_image = doc.extract_image(xref)
+                        
+                        if not base_image or "image" not in base_image:
+                            continue
+                        
+                        image_bytes = base_image["image"]
+                        if not image_bytes:
+                            continue
+                        
+                        # Convert to PIL Image
+                        pil_image = Image.open(io.BytesIO(image_bytes))
+                        
+                        # Filter small images (likely icons/logos)
+                        if pil_image.width < min_width or pil_image.height < min_height:
+                            continue
+                        
+                        # Convert to RGB if necessary
+                        if pil_image.mode != 'RGB':
+                            pil_image = pil_image.convert('RGB')
+                        
+                        # Convert to base64 for API calls
+                        buffered = io.BytesIO()
+                        pil_image.save(buffered, format="JPEG", quality=85)
+                        base64_data = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                        
+                        images.append(ExtractedImage(
+                            image=pil_image,
+                            page_number=page_num + 1,
+                            image_index=img_index,
+                            base64_data=base64_data
+                        ))
+                        page_had_images = True
+                        
+                    except Exception as e:
+                        print(f"Warning: Could not extract image {img_index} from page {page_num + 1}: {e}")
+                        continue
+                
+                # Method 2: If no embedded images found, render page as image
+                # (handles scanned PDFs / image-only PDFs)
+                if not page_had_images:
+                    try:
+                        # Render page at 150 DPI
+                        mat = fitz.Matrix(150 / 72, 150 / 72)
+                        pix = page.get_pixmap(matrix=mat)
+                        
+                        if pix.width >= min_width and pix.height >= min_height:
+                            img_bytes = pix.tobytes("jpeg")
+                            pil_image = Image.open(io.BytesIO(img_bytes))
+                            
+                            if pil_image.mode != 'RGB':
+                                pil_image = pil_image.convert('RGB')
+                            
+                            base64_data = base64.b64encode(img_bytes).decode('utf-8')
+                            
+                            images.append(ExtractedImage(
+                                image=pil_image,
+                                page_number=page_num + 1,
+                                image_index=0,
+                                base64_data=base64_data
+                            ))
+                    except Exception as e:
+                        print(f"Warning: Could not render page {page_num + 1} as image: {e}")
+                        continue
         
-        doc.close()
+        finally:
+            if doc:
+                doc.close()
+        
         return images
     
     def _compute_clip_embeddings(self, images: List[ExtractedImage]) -> np.ndarray:
@@ -249,14 +304,24 @@ class AdvancedRAGSystem:
         
         with torch.no_grad():
             for img in images:
-                inputs = self.clip_processor(images=img.image, return_tensors="pt")
-                image_features = self.clip_model.get_image_features(**inputs)
-                # Normalize embedding
-                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-                embeddings.append(image_features.cpu().numpy().flatten())
-                img.embedding = embeddings[-1]
+                try:
+                    inputs = self.clip_processor(images=img.image, return_tensors="pt")
+                    image_features = self.clip_model.get_image_features(**inputs)
+                    # Handle case where model returns output object instead of tensor
+                    if hasattr(image_features, 'pooler_output'):
+                        image_features = image_features.pooler_output
+                    elif hasattr(image_features, 'last_hidden_state'):
+                        image_features = image_features.last_hidden_state[:, 0, :]
+                    # Normalize embedding using torch.linalg.norm for compatibility
+                    norm = torch.linalg.norm(image_features, dim=-1, keepdim=True)
+                    image_features = image_features / norm.clamp(min=1e-8)
+                    embeddings.append(image_features.cpu().numpy().flatten())
+                    img.embedding = embeddings[-1]
+                except Exception as e:
+                    print(f"Warning: Could not compute CLIP embedding for image: {e}")
+                    continue
         
-        return np.array(embeddings)
+        return np.array(embeddings) if embeddings else np.array([])
     
     def _get_text_clip_embedding(self, text: str) -> np.ndarray:
         """
@@ -272,11 +337,21 @@ class AdvancedRAGSystem:
             return np.array([])
         
         with torch.no_grad():
-            inputs = self.clip_processor(text=[text], return_tensors="pt", padding=True)
-            text_features = self.clip_model.get_text_features(**inputs)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-        
-        return text_features.cpu().numpy().flatten()
+            try:
+                inputs = self.clip_processor(text=[text], return_tensors="pt", padding=True)
+                text_features = self.clip_model.get_text_features(**inputs)
+                # Handle case where model returns output object instead of tensor
+                if hasattr(text_features, 'pooler_output'):
+                    text_features = text_features.pooler_output
+                elif hasattr(text_features, 'last_hidden_state'):
+                    text_features = text_features.last_hidden_state[:, 0, :]
+                # Normalize embedding using torch.linalg.norm for compatibility
+                norm = torch.linalg.norm(text_features, dim=-1, keepdim=True)
+                text_features = text_features / norm.clamp(min=1e-8)
+                return text_features.cpu().numpy().flatten()
+            except Exception as e:
+                print(f"Warning: Could not compute CLIP text embedding: {e}")
+                return np.array([])
     
     def search_images(self, query: str, top_k: int = 3) -> List[Tuple[ExtractedImage, float]]:
         """
@@ -384,9 +459,85 @@ Be thorough but concise in your analysis."""
             results.append((img, analysis))
         return results
     
+    def load_image(self, image_path: str = None, image_data: bytes = None, image_name: str = "uploaded_image") -> int:
+        """
+        Load a standalone image file for analysis.
+        
+        Args:
+            image_path: Path to image file (optional if image_data provided)
+            image_data: Raw image bytes (optional if image_path provided)
+            image_name: Name for the image
+            
+        Returns:
+            Number of images loaded
+        """
+        try:
+            if image_path:
+                pil_image = Image.open(image_path)
+            elif image_data:
+                pil_image = Image.open(io.BytesIO(image_data))
+            else:
+                raise ValueError("Either image_path or image_data must be provided")
+            
+            if pil_image.mode != 'RGB':
+                pil_image = pil_image.convert('RGB')
+            
+            # Convert to base64
+            buffered = io.BytesIO()
+            pil_image.save(buffered, format="JPEG", quality=85)
+            base64_data = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            
+            img = ExtractedImage(
+                image=pil_image,
+                page_number=0,  # standalone image
+                image_index=len(self.extracted_images),
+                base64_data=base64_data
+            )
+            
+            self.extracted_images.append(img)
+            
+            # Compute CLIP embedding for the new image
+            if self.clip_model:
+                self._compute_clip_embeddings([img])
+                # Update the combined embeddings array
+                all_embeddings = [i.embedding for i in self.extracted_images if i.embedding is not None]
+                if all_embeddings:
+                    self.image_embeddings = np.array(all_embeddings)
+            
+            self.is_loaded = True
+            print(f"Image loaded: {image_name}")
+            return 1
+            
+        except Exception as e:
+            print(f"Error loading image: {e}")
+            raise
+    
+    def load_images(self, image_files: list) -> int:
+        """
+        Load multiple standalone images.
+        
+        Args:
+            image_files: List of dicts with 'data' (bytes) and 'name' (str)
+            
+        Returns:
+            Number of images loaded
+        """
+        count = 0
+        for img_file in image_files:
+            try:
+                self.load_image(
+                    image_data=img_file.get('data'),
+                    image_name=img_file.get('name', f'image_{count}')
+                )
+                count += 1
+            except Exception as e:
+                print(f"Warning: Failed to load image {img_file.get('name', '?')}: {e}")
+        return count
+    
     def load_pdf(self, pdf_path: str) -> int:
         """
-        Load and process a PDF document
+        Load and process a PDF document.
+        Handles text-only, image-only, and mixed PDFs gracefully.
         
         Args:
             pdf_path: Path to the PDF file
@@ -402,24 +553,33 @@ Be thorough but concise in your analysis."""
         print(f"Loading PDF: {pdf_path.name}")
         print(f"{'='*50}")
         
-        # Load PDF
-        loader = PyPDFLoader(str(pdf_path))
-        documents = loader.load()
-        print(f"Pages loaded: {len(documents)}")
+        # Load PDF text
+        try:
+            loader = PyPDFLoader(str(pdf_path))
+            documents = loader.load()
+            print(f"Pages loaded: {len(documents)}")
+        except Exception as e:
+            print(f"Warning: Could not extract text from PDF: {e}")
+            documents = []
         
-        # Split into chunks
-        self.chunks = self.text_splitter.split_documents(documents)
+        # Split into chunks (filter out empty/whitespace-only content)
+        all_chunks = self.text_splitter.split_documents(documents) if documents else []
+        self.chunks = [c for c in all_chunks if c.page_content.strip()]
         self.chunk_texts = [chunk.page_content for chunk in self.chunks]
-        print(f"Chunks created: {len(self.chunks)}")
+        print(f"Text chunks created: {len(self.chunks)}")
         
-        # Create vector store
-        print("Creating vector embeddings...")
-        self.vectorstore = FAISS.from_documents(self.chunks, self.embeddings)
-        
-        # Create BM25 index
-        print("Building BM25 index...")
-        tokenized_chunks = [text.lower().split() for text in self.chunk_texts]
-        self.bm25 = BM25Okapi(tokenized_chunks)
+        # Create vector store only if we have text chunks
+        if self.chunks:
+            print("Creating vector embeddings...")
+            self.vectorstore = FAISS.from_documents(self.chunks, self.embeddings)
+            
+            print("Building BM25 index...")
+            tokenized_chunks = [text.lower().split() for text in self.chunk_texts]
+            self.bm25 = BM25Okapi(tokenized_chunks)
+        else:
+            print("No text content found in PDF (image-only document).")
+            self.vectorstore = None
+            self.bm25 = None
         
         # Extract images if enabled
         if self.enable_image_support:
@@ -432,14 +592,21 @@ Be thorough but concise in your analysis."""
                 self.image_embeddings = self._compute_clip_embeddings(self.extracted_images)
                 print(f"Image embeddings computed: {len(self.image_embeddings)}")
         
-        self.is_loaded = True
-        print(f"\nDocument processed successfully!")
-        print(f"Ready to answer questions about: {pdf_path.name}")
+        # Mark as loaded if we have either text or images
+        if self.chunks or self.extracted_images:
+            self.is_loaded = True
+            print(f"\nDocument processed successfully!")
+            print(f"Ready to answer questions about: {pdf_path.name}")
+        else:
+            raise ValueError("PDF contains no extractable text or images.")
         
         return len(self.chunks)
     
     def _vector_search(self, query: str, k: int) -> List[Tuple[int, float]]:
         """Perform vector similarity search"""
+        if not self.vectorstore or not self.chunk_texts:
+            return []
+        
         results = self.vectorstore.similarity_search_with_score(query, k=k)
         # Find indices and normalize scores
         indices_scores = []
@@ -455,8 +622,14 @@ Be thorough but concise in your analysis."""
     
     def _bm25_search(self, query: str, k: int) -> List[Tuple[int, float]]:
         """Perform BM25 keyword search"""
+        if not self.bm25 or not self.chunk_texts:
+            return []
+        
         tokenized_query = query.lower().split()
         scores = self.bm25.get_scores(tokenized_query)
+        
+        if len(scores) == 0:
+            return []
         
         # Get top k indices
         top_indices = np.argsort(scores)[::-1][:k]
@@ -603,6 +776,7 @@ ANSWER:"""
     def query(self, question: str, show_sources: bool = True) -> str:
         """
         Full RAG pipeline: Retrieve -> Rerank -> Generate
+        Automatically falls back to image-only analysis if no text is available.
         
         Args:
             question: User question
@@ -612,10 +786,16 @@ ANSWER:"""
             Generated answer with optional sources
         """
         if not self.is_loaded:
-            return "Please load a PDF document first using load_pdf()"
+            return "Please load a PDF document or images first."
         
-        # Retrieve relevant chunks
-        chunks = self.retrieve(question)
+        # If we have text chunks, use text retrieval
+        chunks = []
+        if self.vectorstore and self.chunk_texts:
+            chunks = self.retrieve(question)
+        
+        # If no text chunks but we have images, auto-redirect to image analysis
+        if not chunks and self.extracted_images and self.enable_image_support:
+            return self._image_only_query(question, show_sources)
         
         if not chunks:
             return "No relevant information found in the document."
@@ -632,9 +812,69 @@ ANSWER:"""
         
         return answer
     
+    def _image_only_query(self, question: str, show_sources: bool = True) -> str:
+        """
+        Handle queries when only images are available (no text content).
+        Searches for relevant images and analyzes them with vision model.
+        
+        Args:
+            question: User question
+            show_sources: Whether to show source information
+            
+        Returns:
+            Generated answer based on image analysis
+        """
+        # Search for most relevant images
+        relevant_images = self.search_images(question, top_k=3)
+        
+        if not relevant_images:
+            # If CLIP search finds nothing above threshold, analyze first few images
+            relevant_images = [(img, 0.0) for img in self.extracted_images[:3]]
+        
+        # Analyze each relevant image
+        analyses = []
+        image_sources = []
+        for img, score in relevant_images:
+            analysis = self.analyze_image_with_vision(img, question)
+            analyses.append(f"[Image from Page {img.page_number}]:\n{analysis}")
+            image_sources.append((img, score))
+        
+        # Combine analyses into a response
+        combined_analysis = "\n\n---\n\n".join(analyses)
+        
+        try:
+            response = self.groq_client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a medical AI assistant. Synthesize the image analyses below into a clear, comprehensive answer to the user's question."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Based on these medical image analyses:\n\n{combined_analysis}\n\nQuestion: {question}\n\nProvide a synthesized answer:"
+                    }
+                ],
+                model=self.llm_model,
+                temperature=0.3,
+                max_tokens=1500
+            )
+            answer = response.choices[0].message.content
+        except Exception as e:
+            answer = f"Image Analysis Results:\n\n{combined_analysis}"
+        
+        if show_sources:
+            sources = "\n\n📚 **Sources:**\n"
+            for i, (img, score) in enumerate(image_sources, 1):
+                page_label = f"Page {img.page_number}" if img.page_number > 0 else "Uploaded Image"
+                sources += f"  [Image {i}] {page_label}\n"
+            answer += sources
+        
+        return answer
+    
     def query_with_images(self, question: str, show_sources: bool = True, include_image_analysis: bool = True, top_k_images: int = 2) -> Tuple[str, List[Tuple[ExtractedImage, str]]]:
         """
         Full RAG pipeline with image analysis: Retrieve -> Rerank -> Search Images -> Analyze -> Generate
+        Automatically handles text-only, image-only, and mixed documents.
         
         Args:
             question: User question
@@ -646,10 +886,12 @@ ANSWER:"""
             Tuple of (generated answer, list of (image, analysis) tuples)
         """
         if not self.is_loaded:
-            return "Please load a PDF document first using load_pdf()", []
+            return "Please load a PDF document or images first.", []
         
-        # Retrieve relevant chunks
-        chunks = self.retrieve(question)
+        # Retrieve relevant text chunks (only if text index exists)
+        chunks = []
+        if self.vectorstore and self.chunk_texts:
+            chunks = self.retrieve(question)
         
         # Search for relevant images
         image_results = []
@@ -658,11 +900,16 @@ ANSWER:"""
         if include_image_analysis and self.extracted_images and self.enable_image_support:
             relevant_images = self.search_images(question, top_k=top_k_images)
             
+            # If CLIP search finds nothing above threshold, use first few images
+            if not relevant_images:
+                relevant_images = [(img, 0.0) for img in self.extracted_images[:top_k_images]]
+            
             for img, score in relevant_images:
                 # Analyze each relevant image with the specific question
                 analysis = self.analyze_image_with_vision(img, question)
                 image_results.append((img, analysis))
-                image_context += f"\n\n[Image from Page {img.page_number} - Similarity: {score:.3f}]\n{analysis}"
+                page_label = f"Page {img.page_number}" if img.page_number > 0 else "Uploaded Image"
+                image_context += f"\n\n[Image from {page_label} - Similarity: {score:.3f}]\n{analysis}"
         
         if not chunks and not image_results:
             return "No relevant information found in the document.", []
