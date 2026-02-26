@@ -1,0 +1,40 @@
+# Advanced RAG System — pip requirements
+# Install with: pip install -r requirements.txt
+
+# Core
+torch
+torchvision
+numpy
+python-dotenv>=1.0.0
+
+# PDF Processing
+pypdf
+PyMuPDF>=1.24.0
+
+# Embeddings & Transformers
+sentence-transformers>=2.7.0
+transformers>=4.40.0
+accelerate>=0.30.0
+
+# Image Processing
+Pillow>=10.0.0
+
+# Vector Store
+faiss-cpu>=1.8.0
+
+# BM25 for hybrid search
+rank-bm25>=0.2.2
+
+# LangChain stack
+langchain>=0.2.0
+langchain-community>=0.2.0
+langchain-core>=0.2.0
+langchain-huggingface>=0.0.3
+langchain-text-splitters>=0.2.0
+
+# Groq LLM
+groq>=0.5.0
+
+# Optional: UI frameworks (for web interface)
+streamlit
+
