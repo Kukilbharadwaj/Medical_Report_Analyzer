@@ -257,17 +257,6 @@ def main():
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-            # Display associated images if any
-            if "images" in message and message["images"]:
-                st.markdown("**📸 Analyzed Medical Images:**")
-                for img, analysis in message["images"]:
-                    col1, col2 = st.columns([1, 2])
-                    with col1:
-                        caption = f"Page {img.page_number}" if img.page_number > 0 else "Uploaded Image"
-                        st.image(img.image, caption=caption, use_container_width=True)
-                    with col2:
-                        with st.expander("View Image Analysis", expanded=False):
-                            st.markdown(analysis)
     
     # Chat input
     if prompt := st.chat_input("Ask a question about the medical report or images..."):
@@ -293,23 +282,10 @@ def main():
                             )
                             st.markdown(answer)
                             
-                            # Display analyzed images
-                            if image_results:
-                                st.markdown("**📸 Analyzed Medical Images:**")
-                                for img, analysis in image_results:
-                                    col1, col2 = st.columns([1, 2])
-                                    with col1:
-                                        caption = f"Page {img.page_number}" if img.page_number > 0 else "Uploaded Image"
-                                        st.image(img.image, caption=caption, use_container_width=True)
-                                    with col2:
-                                        with st.expander("View Image Analysis", expanded=True):
-                                            st.markdown(analysis)
-                            
-                            # Store message with images
+                            # Store message (text only)
                             st.session_state.messages.append({
                                 "role": "assistant", 
-                                "content": answer,
-                                "images": image_results
+                                "content": answer
                             })
                         else:
                             # Text-only query

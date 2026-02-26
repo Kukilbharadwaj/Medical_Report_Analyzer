@@ -254,29 +254,35 @@ class AdvancedRAGSystem:
                         print(f"Warning: Could not extract image {img_index} from page {page_num + 1}: {e}")
                         continue
                 
-                # Method 2: If no embedded images found, render page as image
-                # (handles scanned PDFs / image-only PDFs)
+                # Method 2: If no embedded images found AND page has little/no text,
+                # render page as image (handles scanned PDFs / image-only PDFs)
                 if not page_had_images:
                     try:
-                        # Render page at 150 DPI
-                        mat = fitz.Matrix(150 / 72, 150 / 72)
-                        pix = page.get_pixmap(matrix=mat)
+                        # Check if page has significant text content
+                        page_text = page.get_text().strip()
+                        has_text = len(page_text) > 50  # More than ~50 chars indicates real text
                         
-                        if pix.width >= min_width and pix.height >= min_height:
-                            img_bytes = pix.tobytes("jpeg")
-                            pil_image = Image.open(io.BytesIO(img_bytes))
+                        # Only render page as image if it lacks text (scanned/image PDF)
+                        if not has_text:
+                            # Render page at 150 DPI
+                            mat = fitz.Matrix(150 / 72, 150 / 72)
+                            pix = page.get_pixmap(matrix=mat)
                             
-                            if pil_image.mode != 'RGB':
-                                pil_image = pil_image.convert('RGB')
-                            
-                            base64_data = base64.b64encode(img_bytes).decode('utf-8')
-                            
-                            images.append(ExtractedImage(
-                                image=pil_image,
-                                page_number=page_num + 1,
-                                image_index=0,
-                                base64_data=base64_data
-                            ))
+                            if pix.width >= min_width and pix.height >= min_height:
+                                img_bytes = pix.tobytes("jpeg")
+                                pil_image = Image.open(io.BytesIO(img_bytes))
+                                
+                                if pil_image.mode != 'RGB':
+                                    pil_image = pil_image.convert('RGB')
+                                
+                                base64_data = base64.b64encode(img_bytes).decode('utf-8')
+                                
+                                images.append(ExtractedImage(
+                                    image=pil_image,
+                                    page_number=page_num + 1,
+                                    image_index=0,
+                                    base64_data=base64_data
+                                ))
                     except Exception as e:
                         print(f"Warning: Could not render page {page_num + 1} as image: {e}")
                         continue
